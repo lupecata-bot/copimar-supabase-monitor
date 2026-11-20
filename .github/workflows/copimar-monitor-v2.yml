@@ -1,0 +1,167 @@
+name: COPIMAR Monitor Mensual
+
+on:
+  schedule:
+    - cron: '0 8 15 * *'   # día 15 de cada mes a las 8:00 UTC (9:00 España)
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verificar y reparar
+        id: check
+        run: |
+          pip install requests -q
+          python3 - <<'PYEOF'
+          import requests, sys, os, json
+          from datetime import datetime, timedelta, timezone
+
+          URL = "https://snxqmtaieewnnhrtbgtl.supabase.co"
+          KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueHFtdGFpZWV3bm5ocnRiZ3RsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA0Njc2NzMsImV4cCI6MjA4NjA0MzY3M30.OD5AFXTmvny23v6_CJqc6s2_xewYC672I_ARmQeGy6M"
+          GH_TOKEN  = os.environ.get("GH_TOKEN", "")
+          GH_REPO   = "lupecata-bot"
+          GH_OWNER  = "lupecata-bot"
+
+          H = {"apikey": KEY, "Authorization": f"Bearer {KEY}"}
+
+          problemas = []
+          reparaciones = []
+
+          # ── 1. Comprobar conectividad Supabase ────────────────────────────
+          print("=== 1. Conectividad Supabase ===")
+          try:
+              r = requests.get(f"{URL}/rest/v1/equipos?select=id&limit=1",
+                               headers=H, timeout=10)
+              if r.status_code == 200:
+                  print("  OK — Supabase responde")
+              else:
+                  raise Exception(f"HTTP {r.status_code}: {r.text[:200]}")
+          except Exception as e:
+              msg = f"Supabase no responde: {e}"
+              print(f"  ERROR — {msg}")
+              problemas.append(msg)
+
+          # ── 2. Comprobar datos recientes en lecturas ───────────────────────
+          print("\n=== 2. Datos recientes en lecturas ===")
+          try:
+              r = requests.get(
+                  f"{URL}/rest/v1/lecturas?select=fecha_lectura&order=fecha_lectura.desc&limit=1",
+                  headers=H, timeout=10)
+              rows = r.json()
+              if rows:
+                  ultima = rows[0]["fecha_lectura"]
+                  fecha_ultima = datetime.strptime(ultima, "%Y-%m-%d").date()
+                  dias = (datetime.now().date() - fecha_ultima).days
+                  print(f"  Última lectura: {ultima} (hace {dias} días)")
+                  if dias > 10:
+                      msg = f"Sin lecturas en {dias} días (última: {ultima})"
+                      problemas.append(msg)
+                      print(f"  AVISO — {msg}")
+              else:
+                  msg = "Tabla lecturas vacía"
+                  problemas.append(msg)
+                  print(f"  AVISO — {msg}")
+          except Exception as e:
+              msg = f"Error leyendo lecturas: {e}"
+              problemas.append(msg)
+              print(f"  ERROR — {msg}")
+
+          # ── 3. Comprobar que hay registros para los 4 clientes clave ──────
+          print("\n=== 3. Clientes clave (2222/3333/4444/5555) ===")
+          try:
+              r = requests.get(
+                  f"{URL}/rest/v1/clientes?select=codigo,nombre&codigo=like.%25222",
+                  headers=H, timeout=10)
+              found = len(r.json())
+              print(f"  Clientes encontrados: {found}")
+              if found == 0:
+                  problemas.append("No se encontraron clientes clave")
+          except Exception as e:
+              print(f"  ERROR — {e}")
+
+          # ── 4. Si hay problemas, lanzar keepalive de emergencia ───────────
+          print("\n=== 4. Reparación automática ===")
+          if problemas and GH_TOKEN:
+              try:
+                  gh_headers = {
+                      "Authorization": f"Bearer {GH_TOKEN}",
+                      "Accept": "application/vnd.github+json"
+                  }
+                  resp = requests.post(
+                      f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/actions/workflows/copimar-keepalive.yml/dispatches",
+                      headers=gh_headers,
+                      json={"ref": "main"},
+                      timeout=15
+                  )
+                  if resp.status_code in (204, 200):
+                      rep = "Keepalive de emergencia lanzado correctamente"
+                      reparaciones.append(rep)
+                      print(f"  OK — {rep}")
+                  else:
+                      print(f"  ERROR al lanzar keepalive: HTTP {resp.status_code}")
+              except Exception as e:
+                  print(f"  ERROR al lanzar keepalive: {e}")
+          elif not problemas:
+              print("  No se necesita reparación — todo OK")
+          else:
+              print("  AVISO: GH_TOKEN no configurado, no se pudo lanzar reparación")
+
+          # ── 5. Preparar resumen para el email ─────────────────────────────
+          estado = "LISTO PARA EXPORTAR" if not problemas else "REQUIERE ATENCION"
+          print(f"\n=== Resumen final: {estado} ===")
+
+          with open("/tmp/monitor_result.txt", "w") as f:
+              f.write(f"ESTADO: {estado}\n\n")
+              if not problemas:
+                  f.write("Todo correcto. El exportador puede usarse sin incidencias.\n")
+              else:
+                  f.write(f"Problemas detectados ({len(problemas)}):\n")
+                  for p in problemas:
+                      f.write(f"  - {p}\n")
+                  f.write("\n")
+                  if reparaciones:
+                      f.write(f"Reparaciones aplicadas:\n")
+                      for rep in reparaciones:
+                          f.write(f"  + {rep}\n")
+                  else:
+                      f.write("No se pudieron aplicar reparaciones automaticas.\n")
+              f.write(f"\nFecha revision: {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
+
+          if problemas and not reparaciones:
+              sys.exit(1)
+          PYEOF
+
+      - name: Leer resultado
+        id: resultado
+        if: always()
+        run: |
+          if [ -f /tmp/monitor_result.txt ]; then
+            echo "BODY<<EOF" >> $GITHUB_OUTPUT
+            cat /tmp/monitor_result.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "BODY=No se pudo generar el informe." >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enviar informe por email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USER }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "COPIMAR Monitor — ${{ job.status == 'success' && 'TODO OK' || 'INCIDENCIA DETECTADA' }}"
+          to: lupecata@gmail.com
+          from: lupecata@gmail.com
+          body: |
+            Informe mensual del exportador COPIMAR.
+
+            ${{ steps.resultado.outputs.BODY }}
+
+            Ver log completo:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            — Agente de control COPIMAR
