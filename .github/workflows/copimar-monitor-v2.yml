@@ -132,19 +132,7 @@ jobs:
               sys.exit(1)
           PYEOF
 
-      - name: Leer resultado
-        id: resultado
-        if: always()
-        run: |
-          if [ -f /tmp/monitor_result.txt ]; then
-            echo "BODY<<EOF" >> $GITHUB_OUTPUT
-            cat /tmp/monitor_result.txt >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "BODY=No se pudo generar el informe." >> $GITHUB_OUTPUT
-          fi
-
-      - name: Enviar informe por email
+          - name: Enviar informe por email
         if: always()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -159,7 +147,7 @@ jobs:
           body: |
             Informe mensual del exportador COPIMAR.
 
-            ${{ steps.resultado.outputs.BODY }}
+
 
             Ver log completo:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
